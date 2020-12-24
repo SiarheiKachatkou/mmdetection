@@ -446,7 +446,7 @@ class RandomFlip(object):
 
             results['flip'] = cur_dir is not None
         if 'flip_direction' not in results:
-            results['flip_direction'] = cur_dir
+            results['flip_direction'] = cur_dir if results['flip'] else None
         if results['flip']:
             # flip image
             for key in results.get('img_fields', ['img']):

@@ -5,6 +5,31 @@ import torch.nn as nn
 from ..builder import DETECTORS, build_backbone, build_head, build_neck
 from .base import BaseDetector
 
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+def draw_anchors(imgs,anchors,feat_sizes,img_metas):
+    img_idx=0
+
+    img = imgs[0,0].detach().cpu().numpy().astype(np.float32)
+    img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+    for i, feat_map in enumerate(feat_sizes):
+
+        scale_y,scale_x=1,1
+        for a in anchors[0]:
+            color=(int(np.random.random_integers(0,255)),int(np.random.random_integers(0,255)),int(np.random.random_integers(0,255)))
+
+            rects=a[i].detach().cpu().numpy()
+            for r in rects:
+                p1=(int(scale_x*r[0]),int(scale_y*r[1]))
+                p2=(int(scale_x*r[2]),int(scale_y*r[3]))
+                cv2.rectangle(img,p1,p2,color)
+        plt.imshow(img)
+        plt.show()
+        dbg=1
 
 @DETECTORS.register_module()
 class TwoStageDetector(BaseDetector):
@@ -139,7 +164,16 @@ class TwoStageDetector(BaseDetector):
         Returns:
             dict[str, Tensor]: a dictionary of loss components
         """
+
+
+
         x = self.extract_feat(img)
+        '''
+        feat_sizes = [x_i.shape[-2:] for x_i in x]
+        anchors = self.rpn_head.get_anchors(feat_sizes, img_metas, device=x[0].device)
+        draw_anchors(img, anchors, feat_sizes, img_metas)
+        '''
+
 
         losses = dict()
 
