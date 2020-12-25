@@ -1,7 +1,7 @@
 import torch
 from mmcv.ops import batched_nms
 from ..builder import HEADS
-from .anchor_head import AnchorHead
+from .anchor_head_s import AnchorHeadS
 import torch.nn as nn
 from .rpn_test_mixin import RPNTestMixin
 import matplotlib.pyplot as plt
@@ -29,14 +29,18 @@ def draw_anchors(x,anchors,feat_sizes,img_metas):
         dbg=1
 
 @HEADS.register_module()
-class RPNHeadS(AnchorHead):
+class RPNHeadS(AnchorHeadS):
 
     def __init__(self, in_channels, feat_channels, **kwargs):
         super().__init__(in_channels=in_channels, feat_channels=feat_channels, num_classes=1, **kwargs)
 
         self._num_feat_maps=len(kwargs['anchor_generator']['strides'])
         for i in range(self._num_feat_maps):
-            setattr(self,f"_rpn_conv{i}",nn.Conv2d(in_channels,feat_channels,kernel_size=3,stride=1,padding=1))
+            if i>=len(in_channels):
+                in_c=in_channels[-1]
+            else:
+                in_c=in_channels[i]
+            setattr(self,f"_rpn_conv{i}",nn.Conv2d(in_c,feat_channels,kernel_size=3,stride=1,padding=1))
             setattr(self,f"_rpn_bbox_pred{i}",nn.Conv2d(feat_channels,self.num_anchors*4*self.num_classes,kernel_size=1))
             setattr(self,f"_rpn_cls_score{i}", nn.Conv2d(feat_channels, self.num_anchors*self.num_classes,kernel_size=1))
             setattr(self,f"_rpn_act{i}",nn.Hardswish(inplace=True))
@@ -45,7 +49,7 @@ class RPNHeadS(AnchorHead):
     def forward_single_(self, inputs ):
 
         feat_idx, x = inputs
-        feat_idx=0
+        #feat_idx=0
         feat=getattr(self,f"_rpn_conv{feat_idx}")(x)
         feat=getattr(self,f"_rpn_act{feat_idx}")(feat)
         rpn_bbox_reg = getattr(self,f"_rpn_bbox_pred{feat_idx}")(feat)
