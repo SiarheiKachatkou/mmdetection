@@ -2,6 +2,7 @@ import torch
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import copy
 from mmcv.runner.hooks.hook import HOOKS
 from mmcv.runner.dist_utils import master_only
 from mmcv.runner.hooks.logger.tensorboard import TensorboardLoggerHook
@@ -14,7 +15,7 @@ blue=(0,0,255)
 @HOOKS.register_module()
 class TensorboardImageHook(TensorboardLoggerHook):
 
-    _SHOW_BATCHES=3
+    _SHOW_BATCHES=1
     _SCORE_THR=0.05
 
     @master_only
@@ -81,39 +82,36 @@ class TensorboardImageHook(TensorboardLoggerHook):
         model=runner.model.module
         proposal_cfg = model.train_cfg.get('rpn_proposal',
                                            model.test_cfg.rpn)
-        gt_labels = None
-        gt_bboxes_ignore = None
 
-        imgs, img_metas, gt_bboxes_list = batch['img'].data, batch['img_metas'].data, batch['gt_bboxes'].data
+        imgs, img_metas, gt_bboxes_list, gt_labels_list = batch['img'].data, batch['img_metas'].data, batch['gt_bboxes'].data,batch['gt_labels'].data
 
-        for img, gt_bboxes,img_meta in zip(imgs, gt_bboxes_list, img_metas):
+        for img, gt_bboxes,img_meta, gt_labels in zip(imgs, gt_bboxes_list, img_metas, gt_labels_list):
             img = self._to(runner, img)
-
             feats = model.extract_feat(img)
 
-            gt_bboxes = [g.to(feats[0].device) for g in gt_bboxes]
+            gt_bboxes = self._to(runner,gt_bboxes)
+            gt_labels=self._to(runner,gt_labels)
 
             rpn_losses, proposal_list = model.rpn_head.forward_train(
                 feats,
                 img_meta,
                 gt_bboxes,
-                gt_labels=gt_labels,
-                gt_bboxes_ignore=gt_bboxes_ignore,
                 proposal_cfg=proposal_cfg)
 
             assigner=model.roi_head.bbox_assigner
-
+            sampler=model.roi_head.bbox_sampler
             img_show_np=self._tensor_to_np(img[0])
-            self._draw_assign_results(gt_bboxes[0],proposal_list,assigner,img_show_np,name="assign_proposals",global_step=global_step)
+            self._draw_assign_results(gt_bboxes[0],gt_labels[0], proposal_list,assigner,sampler,img_show_np,name="proposals",global_step=global_step)
 
 
     def _draw_assigned_anchors(self, runner, batch):
 
         global_step = runner.iter * (runner.epoch + 1)
 
-        for img, gt_bbox in zip(batch['img'].data, batch['gt_bboxes'].data):
+        for img, gt_bbox, gt_labels in zip(batch['img'].data, batch['gt_bboxes'].data, batch['gt_labels'].data):
             img_0 = img[0]
-            gt_bbox_0 = gt_bbox[0].to(device)
+            gt_bbox_0 = gt_bbox[0]
+            gt_labels_0 = gt_labels[0]
 
             img_show = self._normalize_img(img_0)
             img_show_np=self._tensor_to_np(img_show)
@@ -123,28 +121,46 @@ class TensorboardImageHook(TensorboardLoggerHook):
             feats = runner.model.module.extract_feat(img)
             feat_sizes = [f.shape[2:] for f in feats]
             device = feats[0].device
+            gt_bbox_0 = gt_bbox_0.to(device)
+            gt_labels_0 = gt_labels_0.to(device)
+
             anchor_generator = runner.model.module.rpn_head.anchor_generator
             assigner = runner.model.module.rpn_head.assigner
+            sampler = runner.model.module.rpn_head.sampler
             
             anchors = anchor_generator.grid_anchors(featmap_sizes=feat_sizes, device=device)
 
-            self._draw_assign_results(gt_bbox_0, anchors, assigner, img_show_np, name='assign_achors', global_step=global_step)
+            self._draw_assign_results(gt_bbox_0, gt_labels_0, anchors, assigner, sampler, img_show_np, name='anchors', global_step=global_step)
             
-    def _draw_assign_results(self, gt_bbox, anchors_list, assigner, img_show_np, name, global_step):
+    def _draw_assign_results(self, gt_bbox, gt_labels, anchors_list, assigner, sampler, img_show_np, name, global_step):
+
+        img_show_np_sampling = copy.deepcopy(img_show_np)
+
         for g in gt_bbox:
             img_show_np = self._draw_bbox(g, img_show_np, red, thickness)
 
         for level in range(len(anchors_list)):
             assign_result = assigner.assign(anchors_list[level], gt_bbox)
+            sample_result=sampler.sample(assign_result,anchors_list[level], gt_bbox, gt_labels)
+            for pos_bb in sample_result.pos_bboxes:
+                img_show_np_sampling = self._draw_bbox(pos_bb, img_show_np_sampling, green, thickness)
+            for neg_bb in sample_result.neg_bboxes:
+                img_show_np_sampling = self._draw_bbox(neg_bb, img_show_np_sampling, red, thickness)
+
+            self.writer.add_image(tag=f"{name}_sampling_cumul_in_level_{level}",
+                                  img_tensor=torch.from_numpy(np.transpose(img_show_np_sampling, (2, 0, 1))),
+                                  global_step=global_step)
 
             for anchor_ind, gt_ind in enumerate(assign_result.gt_inds):
                 if gt_ind > 0:
                     img_show_np = self._draw_bbox(gt_bbox[gt_ind - 1], img_show_np, green, thickness)
-                    img_show_np = self._draw_bbox(anchors_list[level][anchor_ind], img_show_np, blue, thickness)
+                    if anchor_ind<len(anchors_list[level]):
+                        img_show_np = self._draw_bbox(anchors_list[level][anchor_ind], img_show_np, blue, thickness)
 
-            self.writer.add_image(tag=f"{name}_cumul_in_level_{level}",
+            self.writer.add_image(tag=f"{name}_assign_cumul_in_level_{level}",
                                   img_tensor=torch.from_numpy(np.transpose(img_show_np, (2, 0, 1))),
                                   global_step=global_step)
+
 
 
     def _draw_anchors(self, runner, batch):
@@ -177,13 +193,19 @@ class TensorboardImageHook(TensorboardLoggerHook):
         img_norm = img_norm.type(torch.uint8)
         return img_norm
 
-    def _to(self,runner, img_tensor):
+    def _to(self,runner, tensor_or_list):
         gpu_id = runner.model.device_ids[0]
-        img = img_tensor.cuda(gpu_id)
 
-        if 'fp16' in runner.meta['config']:
-            img = img.half()
-        return img
+        def _to_device(tensor):
+            tensor = tensor.cuda(gpu_id)
+            if 'fp16' in runner.meta['config']:
+                tensor = tensor.half()
+            return tensor
+
+        if isinstance(tensor_or_list,list):
+            return [_to_device(t) for t in tensor_or_list]
+        else:
+            return _to_device(tensor_or_list)
 
     def _tensor_to_np(self,img_tensor):
         image_np=img_tensor.float().cpu().detach().numpy()
